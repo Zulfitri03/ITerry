@@ -34,7 +34,7 @@
   const userSchema = new mongoose.Schema({
     username: { type: String, unique: true, required: true },
     password: { type: String, required: true },
-    previousPasswords: { type: [String], default: [] },
+    historyPasswords: { type: [String], default: [] },
     failedLoginAttempts: { type: Number, default: 0 },  // Add this field
     lastFailedLogin: { type: Date, default: null },  // To store when the last failed attempt was made
   });
@@ -96,11 +96,6 @@
   
     return errors;
   };
-
-  // Extend the user schema for password history
-  userSchema.add({
-  passwordHistory: { type: [String], default: [] },
-});
 
   // User routes
   app.post('/api/users/register', async (req, res) => {
