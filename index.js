@@ -65,6 +65,30 @@
     });
   };
 
+  // Helper function to validate password policy
+  const isPasswordValid = (password, username) => {
+  const passwordPolicy = {
+    length: /^.{8,13}$/, // 8-13 characters
+    containsNumber: /\d/, // At least one number
+    containsUppercase: /[A-Z]/, // At least one uppercase letter
+    containsLowercase: /[a-z]/, // At least one lowercase letter
+    noUsername: (pwd, uname) => !pwd.toLowerCase().includes(uname.toLowerCase()), // No username
+  };
+
+  return (
+    passwordPolicy.length.test(password) &&
+    passwordPolicy.containsNumber.test(password) &&
+    passwordPolicy.containsUppercase.test(password) &&
+    passwordPolicy.containsLowercase.test(password) &&
+    passwordPolicy.noUsername(password, username)
+  );
+};
+
+  // Extend the user schema for password history
+  userSchema.add({
+  passwordHistory: { type: [String], default: [] },
+});
+
   // User routes
   app.post('/api/users/register', async (req, res) => {
     const { username, password } = req.body;
@@ -73,6 +97,12 @@
       return res.status(400).send({ error: 'Username and password are required' });
     }
 
+    if (!isPasswordValid(password, username)) {
+      return res.status(400).send({
+        error: 'Password must be 8-13 characters long, contain uppercase, lowercase, a number, and must not include the username.',
+      });
+    }
+  
     try {
       // Check if user already exists
       const existingUser = await User.findOne({ username });
@@ -129,17 +159,41 @@
 
   app.patch('/api/users/:username', authenticateToken, async (req, res) => {
     const { username } = req.params;
-    const update = req.body;
-
+    const { password } = req.body;
+  
+    if (!password) {
+      return res.status(400).send({ error: 'Password is required' });
+    }
+  
     try {
-      if (update.password) {
-        update.password = await bcrypt.hash(update.password, 10);
-      }
-      const result = await User.updateOne({ username }, { $set: update });
-      if (result.nModified === 0) {
+      const user = await User.findOne({ username });
+      if (!user) {
         return res.status(404).send({ error: 'User not found' });
       }
-      res.send({ message: 'User updated successfully' });
+  
+      if (!isPasswordValid(password, username)) {
+        return res.status(400).send({
+          error: 'Password must be 8-13 characters long, contain uppercase, lowercase, a number, and must not include the username.',
+        });
+      }
+  
+      // Check if the password has been used before
+      const hashedPassword = await bcrypt.hash(password, 10);
+      if (user.passwordHistory.includes(hashedPassword)) {
+        return res.status(400).send({ error: 'Password has been used before' });
+      }
+  
+      // Update password and password history
+      user.password = hashedPassword;
+      user.passwordHistory.push(hashedPassword);
+  
+      // Limit password history to the last 5 passwords
+      if (user.passwordHistory.length > 5) {
+        user.passwordHistory.shift();
+      }
+  
+      await user.save();
+      res.send({ message: 'Password updated successfully' });
     } catch (error) {
       res.status(400).send({ error: error.message });
     }
