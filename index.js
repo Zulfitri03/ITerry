@@ -209,13 +209,13 @@ app.patch('/api/users/:username', authenticateToken, async (req, res) => {
     }
 
     if (password) {
-      const passwordErrors = validatePassword(password, username, user.previousPasswords);
+      const passwordErrors = validatePassword(password, username, user.historyPasswords);
       if (passwordErrors.length > 0) {
         return res.status(400).send({ error: passwordErrors.join(' ') });
       }
 
       const hashedPassword = await bcrypt.hash(password, 10);
-      user.previousPasswords.push(user.password);
+      user.historyPasswords.push(user.password);
       user.password = hashedPassword;
       await user.save();
     }
