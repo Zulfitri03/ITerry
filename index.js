@@ -35,6 +35,8 @@
     username: { type: String, unique: true, required: true },
     password: { type: String, required: true },
     previousPasswords: { type: [String], default: [] },
+    failedLoginAttempts: { type: Number, default: 0 },  // Add this field
+    lastFailedLogin: { type: Date, default: null },  // To store when the last failed attempt was made
   });
 
   const questionSchema = new mongoose.Schema({
@@ -132,23 +134,59 @@
 
   app.post('/api/users/login', async (req, res) => {
     const { username, password } = req.body;
-
+  
     if (!username || !password) {
       return res.status(400).send({ error: 'Username and password are required' });
     }
-
+  
     try {
       const user = await User.findOne({ username });
-      if (!user || !(await bcrypt.compare(password, user.password))) {
+  
+      if (!user) {
         return res.status(401).send({ error: 'Invalid credentials' });
       }
-
+  
+      // Check if the account is locked due to too many failed attempts
+      if (user.failedLoginAttempts >= 3) {
+        const timeSinceLastFailed = Date.now() - new Date(user.lastFailedLogin).getTime();
+        const lockoutTime = 1 * 60 * 1000; // 1 minutes
+  
+        if (timeSinceLastFailed < lockoutTime) {
+          return res.status(403).send({
+            error: 'Too many failed login attempts. Please try again later in 60 seconds.',
+          });
+        } else {
+          // Reset failed attempts after the lockout period
+          user.failedLoginAttempts = 0;
+          user.lastFailedLogin = null;
+        }
+      }
+  
+      // Validate the password
+      const isPasswordCorrect = await bcrypt.compare(password, user.password);
+  
+      if (!isPasswordCorrect) {
+        // Increment failed attempts counter
+        user.failedLoginAttempts += 1;
+        user.lastFailedLogin = Date.now();
+        await user.save();
+  
+        return res.status(401).send({ error: 'Invalid credentials' });
+      }
+  
+      // Reset failed attempts on successful login
+      user.failedLoginAttempts = 0;
+      user.lastFailedLogin = null;
+      await user.save();
+  
+      // Generate and return JWT token
       const token = jwt.sign({ username: user.username }, jwtSecret, { expiresIn: '1h' });
       res.json({ token });
     } catch (error) {
       res.status(500).send({ error: 'An error occurred during login' });
     }
   });
+  
 
   app.get('/api/users/:username', authenticateToken, async (req, res) => {
     const username = req.params.username;
