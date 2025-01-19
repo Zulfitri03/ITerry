@@ -34,6 +34,7 @@
   const userSchema = new mongoose.Schema({
     username: { type: String, unique: true, required: true },
     password: { type: String, required: true },
+    previousPasswords: { type: [String], default: [] },
   });
 
   const questionSchema = new mongoose.Schema({
@@ -66,23 +67,33 @@
   };
 
   // Helper function to validate password policy
-  const isPasswordValid = (password, username) => {
-  const passwordPolicy = {
-    length: /^.{8,13}$/, // 8-13 characters
-    containsNumber: /\d/, // At least one number
-    containsUppercase: /[A-Z]/, // At least one uppercase letter
-    containsLowercase: /[a-z]/, // At least one lowercase letter
-    noUsername: (pwd, uname) => !pwd.toLowerCase().includes(uname.toLowerCase()), // No username
+  const validatePassword = (password, username, previousPasswords) => {
+    const errors = [];
+  
+    if (password.length < 8 || password.length > 13) {
+      errors.push('Password must be 8-13 characters long.');
+    }
+    if (!/[0-9]/.test(password)) {
+      errors.push('Password must contain at least one number.');
+    }
+    if (!/[A-Z]/.test(password)) {
+      errors.push('Password must contain at least one uppercase letter.');
+    }
+    if (!/[a-z]/.test(password)) {
+      errors.push('Password must contain at least one lowercase letter.');
+    }
+    if (!/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
+      errors.push('Password must contain at least one special character.');
+    }
+    if (password.toLowerCase().includes(username.toLowerCase())) {
+      errors.push('Password must not contain the username.');
+    }
+    if (previousPasswords.some((hash) => bcrypt.compareSync(password, hash))) {
+      errors.push('Password must not have been used before.');
+    }
+  
+    return errors;
   };
-
-  return (
-    passwordPolicy.length.test(password) &&
-    passwordPolicy.containsNumber.test(password) &&
-    passwordPolicy.containsUppercase.test(password) &&
-    passwordPolicy.containsLowercase.test(password) &&
-    passwordPolicy.noUsername(password, username)
-  );
-};
 
   // Extend the user schema for password history
   userSchema.add({
@@ -97,29 +108,25 @@
       return res.status(400).send({ error: 'Username and password are required' });
     }
 
-    if (!isPasswordValid(password, username)) {
-      return res.status(400).send({
-        error: 'Password must be 8-13 characters long, contain uppercase, lowercase, a number, and must not include the username.',
-      });
-    }
-  
     try {
-      // Check if user already exists
       const existingUser = await User.findOne({ username });
       if (existingUser) {
-        return res.status(400).send({ error: 'User already exists' });
+        return res.status(400).send({ error: 'User already exists.' });
+      }
+  
+      const passwordErrors = validatePassword(password, username, []);
+      if (passwordErrors.length > 0) {
+        return res.status(400).send({ error: passwordErrors.join(' ') });
       }
 
-      // Hash password
       const hashedPassword = await bcrypt.hash(password, 10);
-
-      // Create new user
       const newUser = new User({ username, password: hashedPassword });
       await newUser.save();
-
-      res.status(201).send('User registered successfully');
-    } catch (error) {
-      res.status(400).send('Error registering user');
+  
+      res.status(201).send('User registered successfully.');
+    } 
+      catch (error) {
+      res.status(500).send({ error: 'Error registering user.' });
     }
   });
 
@@ -157,48 +164,35 @@
     }
   });
 
-  app.patch('/api/users/:username', authenticateToken, async (req, res) => {
-    const { username } = req.params;
-    const { password } = req.body;
-  
-    if (!password) {
-      return res.status(400).send({ error: 'Password is required' });
-    }
-  
-    try {
-      const user = await User.findOne({ username });
-      if (!user) {
-        return res.status(404).send({ error: 'User not found' });
-      }
-  
-      if (!isPasswordValid(password, username)) {
-        return res.status(400).send({
-          error: 'Password must be 8-13 characters long, contain uppercase, lowercase, a number, and must not include the username.',
-        });
-      }
-  
-      // Check if the password has been used before
-      const hashedPassword = await bcrypt.hash(password, 10);
-      if (user.passwordHistory.includes(hashedPassword)) {
-        return res.status(400).send({ error: 'Password has been used before' });
-      }
-  
-      // Update password and password history
-      user.password = hashedPassword;
-      user.passwordHistory.push(hashedPassword);
-  
-      // Limit password history to the last 5 passwords
-      if (user.passwordHistory.length > 5) {
-        user.passwordHistory.shift();
-      }
-  
-      await user.save();
-      res.send({ message: 'Password updated successfully' });
-    } catch (error) {
-      res.status(400).send({ error: error.message });
-    }
-  });
+ // Update user password
+app.patch('/api/users/:username', authenticateToken, async (req, res) => {
+  const { username } = req.params;
+  const { password } = req.body;
 
+  try {
+    const user = await User.findOne({ username });
+    if (!user) {
+      return res.status(404).send({ error: 'User not found.' });
+    }
+
+    if (password) {
+      const passwordErrors = validatePassword(password, username, user.previousPasswords);
+      if (passwordErrors.length > 0) {
+        return res.status(400).send({ error: passwordErrors.join(' ') });
+      }
+
+      const hashedPassword = await bcrypt.hash(password, 10);
+      user.previousPasswords.push(user.password);
+      user.password = hashedPassword;
+      await user.save();
+    }
+
+    res.send({ message: 'User updated successfully.' });
+  } catch (error) {
+    res.status(500).send({ error: 'Error updating user.' });
+  }
+});
+  
   app.delete('/api/users/:username', authenticateToken, async (req, res) => {
     const username = req.params.username;
 
