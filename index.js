@@ -8,18 +8,23 @@
 
   const app = express();
   const port = process.env.PORT || 3000;
-  const uri = process.env.MONGODB_URI;
+  const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017';
+
   const jwtSecret = process.env.JWT_SECRET;
+  const fs = require('fs');
+  const x509CertificatePath = process.env.CERT_PATH;
 
   app.use(cors());
   app.use(bodyParser.json());
 
   // Connect to MongoDB using mongoose
   mongoose.connect(uri, {
+      tls: true,  // Use TLS (Transport Layer Security) for encrypted connection
+      tlsCertificateKeyFile: x509CertificatePath, // Path to the X.509 certificate
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
     }).then(() => {
-      console.log('Connected to MongoDB');
+      console.log('Connected to MongoDB using X.509 authentication');
       
       // Start the server
       app.listen(port, () => {
@@ -61,7 +66,7 @@
     const token = authHeader && authHeader.split(' ')[1];
     if (!token) return res.sendStatus(401);
 
-    jwt.verify(token, jwtSecret, (err, user) => {
+    jwt.verify(token, jwtSecret, { algorithms: ['HS256'] }, (err, user) => {
       if (err) return res.sendStatus(403);
       req.user = user;
       next();
@@ -108,7 +113,7 @@
     try {
       const existingUser = await User.findOne({ username });
       if (existingUser) {
-        return res.status(400).send({ error: 'User already exists.' });
+        return res.status(400).send({ error: 'Authentication failed.' });
       }
   
       const passwordErrors = validatePassword(password, username, []);
@@ -138,22 +143,22 @@
       const user = await User.findOne({ username });
   
       if (!user) {
-        return res.status(401).send({ error: 'Invalid credentials' });
+        return res.status(401).send({ error: 'Authentication failed.' });
       }
   
       // Check if the account is locked due to too many failed attempts
-      if (user.failedLoginAttempts >= 3) {
+      const maxFailedAttempts = 3; // Threshold for lockout
+      const baseLockoutTime = 30 * 1000; // Base lockout increment: 30 seconds
+  
+      if (user.failedLoginAttempts >= maxFailedAttempts) {
         const timeSinceLastFailed = Date.now() - new Date(user.lastFailedLogin).getTime();
-        const lockoutTime = 1 * 60 * 1000; // 1 minutes
+        const lockoutTime = baseLockoutTime * (user.failedLoginAttempts - maxFailedAttempts + 1); // Increment lockout time
   
         if (timeSinceLastFailed < lockoutTime) {
+          const remainingTime = Math.ceil((lockoutTime - timeSinceLastFailed) / 1000); // Remaining time in seconds
           return res.status(403).send({
-            error: 'Too many failed login attempts. Please try again later in 60 seconds.',
+            error: `Too many failed login attempts. Please try again later in ${remainingTime} seconds.`,
           });
-        } else {
-          // Reset failed attempts after the lockout period
-          user.failedLoginAttempts = 0;
-          user.lastFailedLogin = null;
         }
       }
   
@@ -166,7 +171,7 @@
         user.lastFailedLogin = Date.now();
         await user.save();
   
-        return res.status(401).send({ error: 'Invalid credentials' });
+        return res.status(401).send({ error: 'Authentication failed.' });
       }
   
       // Reset failed attempts on successful login
@@ -175,14 +180,23 @@
       await user.save();
   
       // Generate and return JWT token
-      const token = jwt.sign({ username: user.username }, jwtSecret, { expiresIn: '1h' });
-      res.json({ token });
+      const payload = { username: user.username, aud: 'your-app', iss: 'your-app' };
+      const token = jwt.sign(payload, jwtSecret, { expiresIn: '1h' });
+
+      res.cookie('token', token, {
+      httpOnly: true,   // Prevents JavaScript from accessing the cookie
+      secure: true,     // Ensures the cookie is only sent over HTTPS
+      maxAge: 3600000,  // 1 hour (Expiration time)
+      sameSite: 'Strict' // Prevents sending cookies with cross-site requests
+    });
+
+    // Respond with a success message (no token in response body)
+    res.send({ message: 'Login successful' });
     } catch (error) {
       res.status(500).send({ error: 'An error occurred during login' });
     }
   });
   
-
   app.get('/api/users/:username', authenticateToken, async (req, res) => {
     const username = req.params.username;
 
@@ -198,9 +212,13 @@
   });
 
  // Update user password
-app.patch('/api/users/:username', authenticateToken, async (req, res) => {
+ app.patch('/api/users/:username', authenticateToken, async (req, res) => {
   const { username } = req.params;
-  const { password } = req.body;
+  const { currentPassword, newPassword } = req.body;
+
+  if (!currentPassword || !newPassword) {
+    return res.status(400).send({ error: 'Current password and new password are required.' });
+  }
 
   try {
     const user = await User.findOne({ username });
@@ -208,23 +226,32 @@ app.patch('/api/users/:username', authenticateToken, async (req, res) => {
       return res.status(404).send({ error: 'User not found.' });
     }
 
-    if (password) {
-      const passwordErrors = validatePassword(password, username, user.historyPasswords);
+    // Verify the current password
+    const isCurrentPasswordCorrect = await bcrypt.compare(currentPassword, user.password);
+    if (!isCurrentPasswordCorrect) {
+      return res.status(401).send({ error: 'Current password is incorrect.' });
+    }
+
+    // Validate the new password
+    if (newPassword) {
+      const passwordErrors = validatePassword(newPassword, username, user.historyPasswords);
       if (passwordErrors.length > 0) {
         return res.status(400).send({ error: passwordErrors.join(' ') });
       }
 
-      const hashedPassword = await bcrypt.hash(password, 10);
-      user.historyPasswords.push(user.password);
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      user.historyPasswords.push(user.password); // Save the old password to history
       user.password = hashedPassword;
       await user.save();
     }
 
-    res.send({ message: 'User updated successfully.' });
+    res.send({ message: 'Password updated successfully.' });
   } catch (error) {
-    res.status(500).send({ error: 'Error updating user.' });
+    console.error('Error updating user:', error);
+    res.status(500).send({ error: 'Error updating user. Please try again later.' });
   }
 });
+
   
   app.delete('/api/users/:username', authenticateToken, async (req, res) => {
     const username = req.params.username;
