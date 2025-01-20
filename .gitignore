@@ -128,3 +128,6 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# Ignore specific X509 certificate file (replace with your actual path)
+.path/to/your-certificate-file.pem
