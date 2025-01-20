@@ -130,4 +130,4 @@ dist
 .pnp.*
 
 # Ignore specific X509 certificate file (replace with your actual path)
-path/to/your-certificate-file.pem
+.path/to/your-certificate-file.pem
