@@ -1,7 +1,7 @@
   const express = require('express');
   const bodyParser = require('body-parser');
-  var cors = require('cors');
-  var jwt = require('jsonwebtoken');
+  const cors = require('cors');
+  const jwt = require('jsonwebtoken');
   const bcrypt = require('bcrypt');
   const mongoose = require('mongoose');
   require('dotenv').config();  // Load environment variables from .env file
@@ -13,6 +13,9 @@
   const jwtSecret = process.env.JWT_SECRET;
   const fs = require('fs');
   const x509CertificatePath = process.env.CERT_PATH;
+
+  const helmet = require('helmet');
+  app.use(helmet());
 
   app.use(cors());
   app.use(bodyParser.json());
@@ -34,7 +37,7 @@
       console.error('Failed to connect to MongoDB:', err);
       process.exit(1);  // Exit process on failure to connect to MongoDB
     });
-
+    
   // Define Schemas and Models
   const userSchema = new mongoose.Schema({
     username: { type: String, unique: true, required: true },
@@ -60,6 +63,10 @@
   const Question = mongoose.model('Question', questionSchema);
   const Score = mongoose.model('Score', scoreSchema);
 
+  const crypto = require('crypto');
+  const encrypt = (data) => crypto.createCipher('aes-256-ctr', process.env.ENCRYPTION_KEY).update(data, 'utf8', 'hex');
+  const decrypt = (data) => crypto.createDecipher('aes-256-ctr', process.env.ENCRYPTION_KEY).update(data, 'hex', 'utf8');
+
   // Middleware for authentication
   const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
@@ -67,76 +74,90 @@
     if (!token) return res.sendStatus(401);
 
     jwt.verify(token, jwtSecret, { algorithms: ['HS256'] }, (err, user) => {
-      if (err) return res.sendStatus(403);
+      if (err) {
+        console.error('JWT Verification Error:', err.message);
+        return res.status(403).send({ error: err.message });
+      }
       req.user = user;
       next();
     });
   };
 
-  // Helper function to validate password policy
-  const validatePassword = (password, username, previousPasswords) => {
-    const errors = [];
-  
-    if (password.length < 8 || password.length > 13) {
-      errors.push('Password must be 8-13 characters long.');
-    }
-    if (!/[0-9]/.test(password)) {
-      errors.push('Password must contain at least one number.');
-    }
-    if (!/[A-Z]/.test(password)) {
-      errors.push('Password must contain at least one uppercase letter.');
-    }
-    if (!/[a-z]/.test(password)) {
-      errors.push('Password must contain at least one lowercase letter.');
-    }
-    if (!/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
-      errors.push('Password must contain at least one special character.');
-    }
-    if (password.toLowerCase().includes(username.toLowerCase())) {
-      errors.push('Password must not contain the username.');
-    }
-    if (previousPasswords.some((hash) => bcrypt.compareSync(password, hash))) {
-      errors.push('Password must not have been used before.');
-    }
-  
-    return errors;
-  };
+  const rateLimit = require('express-rate-limit');
+
+// Configure rate limiting
+  const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: { error: 'Too many requests from this IP, please try again later.' },
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  });
+
+  app.use(apiLimiter);
+
+  // Alternatively, apply the rate limiter only to specific routes
+  const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // Limit each IP to 5 login attempts per windowMs
+  message: { error: 'Too many login attempts, please try again later in 15 minutes.' },
+  });
+
+  const accountLimiter = rateLimit({
+    keyGenerator: (req) => req.body.username || req.ip,
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    message: { error: 'Too many login attempts. Try again later in 15 minutes.' },
+  });
+
 
   // User routes
-  app.post('/api/users/register', async (req, res) => {
+  app.post('/api/users/register', accountLimiter, async (req, res) => {
     const { username, password } = req.body;
-
+  
     if (!username || !password) {
       return res.status(400).send({ error: 'Username and password are required' });
     }
-
+  
+    // Additional validation for username format
+    const usernameRegex = /^[a-zA-Z0-9_]{3,20}$/; // Only alphanumeric and underscores, length 3-20
+    if (!usernameRegex.test(username)) {
+      return res.status(400).send({ error: 'Username must be between 3-20 characters and can only contain alphanumeric characters and underscores.' });
+    }
+  
+    // Validate password
+    const passwordErrors = validatePassword(password, username, []);
+    if (passwordErrors.length > 0) {
+      return res.status(400).send({ error: passwordErrors.join(' ') });
+    }
+  
     try {
       const existingUser = await User.findOne({ username });
       if (existingUser) {
-        return res.status(400).send({ error: 'Authentication failed.' });
+        return res.status(400).send({ error: 'Username is already taken.' });
       }
   
-      const passwordErrors = validatePassword(password, username, []);
-      if (passwordErrors.length > 0) {
-        return res.status(400).send({ error: passwordErrors.join(' ') });
-      }
-
       const hashedPassword = await bcrypt.hash(password, 10);
       const newUser = new User({ username, password: hashedPassword });
       await newUser.save();
-  
+    
       res.status(201).send('User registered successfully.');
-    } 
-      catch (error) {
+    } catch (error) {
       res.status(500).send({ error: 'Error registering user.' });
     }
-  });
+  });  
 
-  app.post('/api/users/login', async (req, res) => {
+  app.post('/api/users/login', loginLimiter, async (req, res) => {
     const { username, password } = req.body;
   
     if (!username || !password) {
       return res.status(400).send({ error: 'Username and password are required' });
+    }
+  
+    // Validate username format
+    const usernameRegex = /^[a-zA-Z0-9_]{3,20}$/;
+    if (!usernameRegex.test(username)) {
+      return res.status(400).send({ error: 'Username must be between 3-20 characters and can only contain alphanumeric characters and underscores.' });
     }
   
     try {
@@ -164,7 +185,6 @@
   
       // Validate the password
       const isPasswordCorrect = await bcrypt.compare(password, user.password);
-  
       if (!isPasswordCorrect) {
         // Increment failed attempts counter
         user.failedLoginAttempts += 1;
@@ -178,10 +198,10 @@
       user.failedLoginAttempts = 0;
       user.lastFailedLogin = null;
       await user.save();
-  
+      
       // Generate and return JWT token
       const payload = { username: user.username, aud: 'your-app', iss: 'your-app' };
-      const token = jwt.sign(payload, jwtSecret, { expiresIn: '1h' });
+      const token = jwt.sign(payload, jwtSecret, { expiresIn: '30m' });
 
       res.cookie('token', token, {
       httpOnly: true,   // Prevents JavaScript from accessing the cookie
@@ -196,6 +216,8 @@
       res.status(500).send({ error: 'An error occurred during login' });
     }
   });
+
+   
   
   app.get('/api/users/:username', authenticateToken, async (req, res) => {
     const username = req.params.username;
@@ -220,6 +242,12 @@
     return res.status(400).send({ error: 'Current password and new password are required.' });
   }
 
+  // Validate password format
+  const passwordErrors = validatePassword(newPassword, username, []);
+  if (passwordErrors.length > 0) {
+    return res.status(400).send({ error: passwordErrors.join(' ') });
+  }
+
   try {
     const user = await User.findOne({ username });
     if (!user) {
@@ -232,18 +260,10 @@
       return res.status(401).send({ error: 'Current password is incorrect.' });
     }
 
-    // Validate the new password
-    if (newPassword) {
-      const passwordErrors = validatePassword(newPassword, username, user.historyPasswords);
-      if (passwordErrors.length > 0) {
-        return res.status(400).send({ error: passwordErrors.join(' ') });
-      }
-
       const hashedPassword = await bcrypt.hash(newPassword, 10);
       user.historyPasswords.push(user.password); // Save the old password to history
       user.password = hashedPassword;
       await user.save();
-    }
 
     res.send({ message: 'Password updated successfully.' });
   } catch (error) {
@@ -381,11 +401,15 @@
   // Submit answers route
   app.post('/api/submit', authenticateToken, async (req, res) => {
     const { username, answers } = req.body;
+    
+    if (!username || !Array.isArray(answers)) {
+      return res.status(400).send({ error: 'Username and answers are required, answers must be an array.' });
+    }
 
+    // Ensure that answers are not empty and match the number of questions
     try {
       // Fetch all questions
       const questions = await Question.find({}).lean();
-
       if (questions.length !== answers.length) {
         return res.status(400).send('Number of answers does not match number of questions');
       }
