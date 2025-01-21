@@ -110,6 +110,38 @@
     message: { error: 'Too many login attempts. Try again later in 15 minutes.' },
   });
 
+  // Password validation function
+  const validatePassword = (password, username, historyPasswords) => {
+  const errors = [];
+  
+  // Check if the password is strong enough
+  const passwordMinLength = 8;
+  const passwordMaxLength = 20;
+  if (password.length < passwordMinLength || password.length > passwordMaxLength) {
+    errors.push(`Password must be between ${passwordMinLength} and ${passwordMaxLength} characters.`);
+  }
+  
+  // Ensure password doesn't contain the username
+  if (password.includes(username)) {
+    errors.push('Password cannot contain the username.');
+  }
+  
+  // Check if password contains at least one number, one uppercase letter, and one special character
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+  
+  if (!hasUpperCase) errors.push('Password must contain at least one uppercase letter.');
+  if (!hasNumber) errors.push('Password must contain at least one number.');
+  if (!hasSpecialChar) errors.push('Password must contain at least one special character.');
+
+  // Check if password matches any of the history passwords
+  if (historyPasswords.includes(password)) {
+    errors.push('Password cannot be the same as any of your previous passwords.');
+  }
+
+  return errors;
+};
 
   // User routes
   app.post('/api/users/register', accountLimiter, async (req, res) => {
